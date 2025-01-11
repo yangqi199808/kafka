@@ -19,36 +19,31 @@ package kafka.zk
 import java.nio.charset.StandardCharsets.UTF_8
 import java.util
 import java.util.Properties
-
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.core.JsonProcessingException
-import kafka.api.LeaderAndIsr
 import kafka.cluster.{Broker, EndPoint}
 import kafka.common.{NotificationHandler, ZkNodeChangeNotificationListener}
 import kafka.controller.{IsrChangeNotificationHandler, LeaderIsrAndControllerEpoch, ReplicaAssignment}
-import kafka.security.authorizer.AclAuthorizer.VersionedAcls
-import kafka.security.authorizer.AclEntry
-import kafka.server.{ConfigType, DelegationTokenManager}
+import kafka.server.DelegationTokenManagerZk
 import kafka.utils.Json
 import kafka.utils.json.JsonObject
+import kafka.zookeeper.Stat
 import org.apache.kafka.common.errors.UnsupportedVersionException
 import org.apache.kafka.common.feature.Features._
 import org.apache.kafka.common.feature.{Features, SupportedVersionRange}
 import org.apache.kafka.common.network.ListenerName
 import org.apache.kafka.common.resource.{PatternType, ResourcePattern, ResourceType}
 import org.apache.kafka.common.security.auth.SecurityProtocol
-import org.apache.kafka.common.security.token.delegation.{DelegationToken, TokenInformation}
+import org.apache.kafka.common.security.token.delegation.TokenInformation
 import org.apache.kafka.common.utils.{SecurityUtils, Time}
 import org.apache.kafka.common.{KafkaException, TopicPartition, Uuid}
 import org.apache.kafka.metadata.LeaderRecoveryState
-import org.apache.kafka.metadata.migration.ZkMigrationLeadershipState
+import org.apache.kafka.network.SocketServerConfigs
+import org.apache.kafka.security.authorizer.AclEntry
 import org.apache.kafka.server.common.{MetadataVersion, ProducerIdsBlock}
-import org.apache.kafka.server.common.MetadataVersion.{IBP_0_10_0_IV1, IBP_2_7_IV0}
-import org.apache.zookeeper.ZooDefs
-import org.apache.zookeeper.data.{ACL, Stat}
+import org.apache.kafka.server.config.ConfigType
 
 import scala.beans.BeanProperty
-import scala.collection.mutable.ArrayBuffer
 import scala.collection.{Map, Seq, immutable, mutable}
 import scala.jdk.CollectionConverters._
 import scala.util.{Failure, Success, Try}
@@ -115,17 +110,8 @@ object BrokerInfo {
    * any case).
    */
   def apply(broker: Broker, metadataVersion: MetadataVersion, jmxPort: Int): BrokerInfo = {
-    val version = {
-      if (metadataVersion.isAtLeast(IBP_2_7_IV0))
-        5
-      else if (metadataVersion.isAtLeast(IBP_0_10_0_IV1))
-        4
-      else
-        2
-    }
-    BrokerInfo(broker, version, jmxPort)
+    throw new UnsupportedOperationException()
   }
-
 }
 
 case class BrokerInfo(broker: Broker, version: Int, jmxPort: Int) {
@@ -185,7 +171,7 @@ object BrokerIdZNode {
       broker.rack, broker.features)
   }
 
-  def featuresAsJavaMap(brokerInfo: JsonObject): util.Map[String, util.Map[String, java.lang.Short]] = {
+  private def featuresAsJavaMap(brokerInfo: JsonObject): util.Map[String, util.Map[String, java.lang.Short]] = {
     FeatureZNode.asJavaMap(brokerInfo
       .get(FeaturesKey)
       .flatMap(_.to[Option[Map[String, Map[String, Int]]]])
@@ -275,12 +261,20 @@ object BrokerIdZNode {
             Seq(endPoint)
           }
           else {
-            val securityProtocolMap = brokerInfo.get(ListenerSecurityProtocolMapKey).map(
-              _.to[Map[String, String]].map { case (listenerName, securityProtocol) =>
-                new ListenerName(listenerName) -> SecurityProtocol.forName(securityProtocol)
-              })
-            val listeners = brokerInfo(EndpointsKey).to[Seq[String]]
-            listeners.map(EndPoint.createEndPoint(_, securityProtocolMap))
+            val securityProtocolMap = brokerInfo.get(ListenerSecurityProtocolMapKey) match {
+              case None => SocketServerConfigs.DEFAULT_NAME_TO_SECURITY_PROTO
+              case Some(m) => {
+                val result = new java.util.HashMap[ListenerName, SecurityProtocol]()
+                m.to[Map[String, String]].foreach {
+                  case (k, v) => result.put(
+                    new ListenerName(k), SecurityProtocol.forName(v))
+                }
+                result
+              }
+            }
+            val listenersString = brokerInfo(EndpointsKey).to[Seq[String]].mkString(",")
+            SocketServerConfigs.listenerListToEndPoints(listenersString, securityProtocolMap).
+              asScala.map(EndPoint.fromJava(_))
           }
 
         val rack = brokerInfo.get(RackKey).flatMap(_.to[Option[String]])
@@ -378,7 +372,7 @@ object TopicPartitionStateZNode {
       "leader" -> leaderAndIsr.leader,
       "leader_epoch" -> leaderAndIsr.leaderEpoch,
       "controller_epoch" -> controllerEpoch,
-      "isr" -> leaderAndIsr.isr.asJava
+      "isr" -> leaderAndIsr.isr
     )
 
     if (leaderAndIsr.leaderRecoveryState != LeaderRecoveryState.RECOVERED) {
@@ -389,20 +383,7 @@ object TopicPartitionStateZNode {
   }
 
   def decode(bytes: Array[Byte], stat: Stat): Option[LeaderIsrAndControllerEpoch] = {
-    Json.parseBytes(bytes).map { js =>
-      val leaderIsrAndEpochInfo = js.asJsonObject
-      val leader = leaderIsrAndEpochInfo("leader").to[Int]
-      val epoch = leaderIsrAndEpochInfo("leader_epoch").to[Int]
-      val isr = leaderIsrAndEpochInfo("isr").to[List[Int]]
-      val recovery = leaderIsrAndEpochInfo
-        .get("leader_recovery_state")
-        .map(jsonValue => LeaderRecoveryState.of(jsonValue.to[Int].toByte))
-        .getOrElse(LeaderRecoveryState.RECOVERED)
-      val controllerEpoch = leaderIsrAndEpochInfo("controller_epoch").to[Int]
-
-      val zkPathVersion = stat.getVersion
-      LeaderIsrAndControllerEpoch(LeaderAndIsr(leader, epoch, isr, recovery, zkPathVersion), controllerEpoch)
-    }
+    throw new UnsupportedOperationException()
   }
 }
 
@@ -461,7 +442,7 @@ object IsrChangeNotificationSequenceZNode {
       }
     }
   }.map(_.toSet).getOrElse(Set.empty)
-  def sequenceNumber(path: String) = path.substring(path.lastIndexOf(SequenceNumberPrefix) + SequenceNumberPrefix.length)
+  def sequenceNumber(path: String): String = path.substring(path.lastIndexOf(SequenceNumberPrefix) + SequenceNumberPrefix.length)
 }
 
 object LogDirEventNotificationZNode {
@@ -470,15 +451,15 @@ object LogDirEventNotificationZNode {
 
 object LogDirEventNotificationSequenceZNode {
   val SequenceNumberPrefix = "log_dir_event_"
-  val LogDirFailureEvent = 1
+  private val LogDirFailureEvent = 1
   def path(sequenceNumber: String) = s"${LogDirEventNotificationZNode.path}/$SequenceNumberPrefix$sequenceNumber"
-  def encode(brokerId: Int) = {
+  def encode(brokerId: Int): Array[Byte] = {
     Json.encodeAsBytes(Map("version" -> 1, "broker" -> brokerId, "event" -> LogDirFailureEvent).asJava)
   }
   def decode(bytes: Array[Byte]): Option[Int] = Json.parseBytes(bytes).map { js =>
     js.asJsonObject("broker").to[Int]
   }
-  def sequenceNumber(path: String) = path.substring(path.lastIndexOf(SequenceNumberPrefix) + SequenceNumberPrefix.length)
+  def sequenceNumber(path: String): String = path.substring(path.lastIndexOf(SequenceNumberPrefix) + SequenceNumberPrefix.length)
 }
 
 object AdminZNode {
@@ -561,14 +542,14 @@ object ConsumerPathZNode {
 }
 
 object ConsumerOffset {
-  def path(group: String, topic: String, partition: Integer) = s"${ConsumerPathZNode.path}/${group}/offsets/${topic}/${partition}"
+  def path(group: String, topic: String, partition: Integer) = s"${ConsumerPathZNode.path}/$group/offsets/$topic/$partition"
   def encode(offset: Long): Array[Byte] = offset.toString.getBytes(UTF_8)
   def decode(bytes: Array[Byte]): Option[Long] = Option(bytes).map(new String(_, UTF_8).toLong)
 }
 
 object ZkVersion {
-  val MatchAnyVersion = -1 // if used in a conditional set, matches any version (the value should match ZooKeeper codebase)
-  val UnknownVersion = -2  // Version returned from get if node does not exist (internal constant for Kafka codebase, unused value in ZK)
+  val MatchAnyVersion: Int = -1 // if used in a conditional set, matches any version (the value should match ZooKeeper codebase)
+  val UnknownVersion: Int = -2  // Version returned from get if node does not exist (internal constant for Kafka codebase, unused value in ZK)
 }
 
 object ZkStat {
@@ -713,13 +694,13 @@ case object LiteralAclChangeStore extends ZkAclChangeStore {
     if (resource.patternType != PatternType.LITERAL)
       throw new IllegalArgumentException("Only literal resource patterns can be encoded")
 
-    val legacyName = resource.resourceType.toString + AclEntry.ResourceSeparator + resource.name
+    val legacyName = resource.resourceType.toString + AclEntry.RESOURCE_SEPARATOR + resource.name
     legacyName.getBytes(UTF_8)
   }
 
   def decode(bytes: Array[Byte]): ResourcePattern = {
     val string = new String(bytes, UTF_8)
-    string.split(AclEntry.ResourceSeparator, 2) match {
+    string.split(AclEntry.RESOURCE_SEPARATOR, 2) match {
         case Array(resourceType, resourceName, _*) => new ResourcePattern(ResourceType.fromString(resourceType), resourceName, PatternType.LITERAL)
         case _ => throw new IllegalArgumentException("expected a string in format ResourceType:ResourceName but got " + string)
       }
@@ -757,8 +738,13 @@ case object ExtendedAclChangeStore extends ZkAclChangeStore {
 object ResourceZNode {
   def path(resource: ResourcePattern): String = ZkAclStore(resource.patternType).path(resource.resourceType, resource.name)
 
-  def encode(acls: Set[AclEntry]): Array[Byte] = Json.encodeAsBytes(AclEntry.toJsonCompatibleMap(acls).asJava)
-  def decode(bytes: Array[Byte], stat: Stat): VersionedAcls = VersionedAcls(AclEntry.fromBytes(bytes), stat.getVersion)
+  def encode(acls: Set[AclEntry]): Array[Byte] = {
+    throw new UnsupportedOperationException()
+  }
+
+  def decode(bytes: Array[Byte], stat: Stat): ZkData.VersionedAcls = {
+    throw new UnsupportedOperationException()
+  }
 }
 
 object ExtendedAclChangeEvent {
@@ -794,7 +780,7 @@ object ClusterIdZNode {
 
   def fromJson(clusterIdJson:  Array[Byte]): String = {
     Json.parseBytes(clusterIdJson).map(_.asJsonObject("id").to[String]).getOrElse {
-      throw new KafkaException(s"Failed to parse the cluster id json $clusterIdJson")
+      throw new KafkaException(s"Failed to parse the cluster id json ${clusterIdJson.mkString("Array(", ", ", ")")}")
     }
   }
 }
@@ -844,7 +830,7 @@ object DelegationTokenChangeNotificationZNode {
 object DelegationTokenChangeNotificationSequenceZNode {
   val SequenceNumberPrefix = "token_change_"
   def createPath = s"${DelegationTokenChangeNotificationZNode.path}/$SequenceNumberPrefix"
-  def deletePath(sequenceNode: String) = s"${DelegationTokenChangeNotificationZNode.path}/${sequenceNode}"
+  def deletePath(sequenceNode: String) = s"${DelegationTokenChangeNotificationZNode.path}/$sequenceNode"
   def encode(tokenId : String): Array[Byte] = tokenId.getBytes(UTF_8)
   def decode(bytes: Array[Byte]): String = new String(bytes, UTF_8)
 }
@@ -855,8 +841,9 @@ object DelegationTokensZNode {
 
 object DelegationTokenInfoZNode {
   def path(tokenId: String) =  s"${DelegationTokensZNode.path}/$tokenId"
-  def encode(token: DelegationToken): Array[Byte] =  Json.encodeAsBytes(DelegationTokenManager.toJsonCompatibleMap(token).asJava)
-  def decode(bytes: Array[Byte]): Option[TokenInformation] = DelegationTokenManager.fromBytes(bytes)
+  def encode(tokenInfo: TokenInformation): Array[Byte] =
+    Json.encodeAsBytes(DelegationTokenManagerZk.toJsonCompatibleMap(tokenInfo).asJava)
+  def decode(bytes: Array[Byte]): Option[TokenInformation] = DelegationTokenManagerZk.fromBytes(bytes)
 }
 
 /**
@@ -1036,48 +1023,16 @@ object FeatureZNode {
   }
 }
 
-object MigrationZNode {
-  val path = "/migration"
-
-  def encode(migration: ZkMigrationLeadershipState): Array[Byte] = {
-    val jsonMap = Map(
-      "version" -> 0,
-      "kraft_controller_id" -> migration.kraftControllerId(),
-      "kraft_controller_epoch" -> migration.kraftControllerEpoch(),
-      "kraft_metadata_offset" -> migration.kraftMetadataOffset(),
-      "kraft_metadata_epoch" -> migration.kraftMetadataEpoch()
-    )
-    Json.encodeAsBytes(jsonMap.asJava)
-  }
-
-  def decode(bytes: Array[Byte], zkVersion: Int, modifyTimeMs: Long): ZkMigrationLeadershipState = {
-    val jsonDataAsString = bytes.map(_.toChar).mkString
-    Json.parseBytes(bytes).map(_.asJsonObject).flatMap { js =>
-      val version = js("version").to[Int]
-      if (version != 0) {
-        throw new KafkaException(s"Encountered unknown version $version when parsing migration json $jsonDataAsString")
-      }
-      val controllerId = js("kraft_controller_id").to[Int]
-      val controllerEpoch = js("kraft_controller_epoch").to[Int]
-      val metadataOffset = js("kraft_metadata_offset").to[Long]
-      val metadataEpoch = js("kraft_metadata_epoch").to[Int]
-      Some(new ZkMigrationLeadershipState(
-        controllerId,
-        controllerEpoch,
-        metadataOffset,
-        metadataEpoch,
-        modifyTimeMs,
-        zkVersion,
-        ZkMigrationLeadershipState.EMPTY.zkControllerEpoch(),
-        ZkMigrationLeadershipState.EMPTY.zkControllerEpochZkVersion()))
-    }.getOrElse(throw new KafkaException(s"Failed to parse the migration json $jsonDataAsString"))
-  }
-}
 
 object ZkData {
 
+  case class VersionedAcls(acls: Set[AclEntry], zkVersion: Int) {
+    def exists: Boolean = zkVersion != ZkVersion.UnknownVersion
+  }
+
+
   // Important: it is necessary to add any new top level Zookeeper path to the Seq
-  val SecureRootPaths = Seq(AdminZNode.path,
+  val SecureRootPaths: Seq[String] = Seq(AdminZNode.path,
     BrokersZNode.path,
     ClusterZNode.path,
     ConfigZNode.path,
@@ -1088,11 +1043,10 @@ object ZkData {
     LogDirEventNotificationZNode.path,
     DelegationTokenAuthZNode.path,
     ExtendedAclZNode.path,
-    MigrationZNode.path,
     FeatureZNode.path) ++ ZkAclStore.securePaths
 
   // These are persistent ZK paths that should exist on kafka broker startup.
-  val PersistentZkPaths = Seq(
+  val PersistentZkPaths: Seq[String] = Seq(
     ConsumerPathZNode.path, // old consumer path
     BrokerIdsZNode.path,
     TopicsZNode.path,
@@ -1102,26 +1056,11 @@ object ZkData {
     IsrChangeNotificationZNode.path,
     ProducerIdBlockZNode.path,
     LogDirEventNotificationZNode.path
-  ) ++ ConfigType.all.map(ConfigEntityTypeZNode.path)
+  ) ++ ConfigType.ALL.asScala.map(ConfigEntityTypeZNode.path)
 
-  val SensitiveRootPaths = Seq(
-    ConfigEntityTypeZNode.path(ConfigType.User),
-    ConfigEntityTypeZNode.path(ConfigType.Broker),
+  val SensitiveRootPaths: Seq[String] = Seq(
+    ConfigEntityTypeZNode.path(ConfigType.USER),
+    ConfigEntityTypeZNode.path(ConfigType.BROKER),
     DelegationTokensZNode.path
   )
-
-  def sensitivePath(path: String): Boolean = {
-    path != null && SensitiveRootPaths.exists(path.startsWith)
-  }
-
-  def defaultAcls(isSecure: Boolean, path: String): Seq[ACL] = {
-    //Old Consumer path is kept open as different consumers will write under this node.
-    if (!ConsumerPathZNode.path.equals(path) && isSecure) {
-      val acls = new ArrayBuffer[ACL]
-      acls ++= ZooDefs.Ids.CREATOR_ALL_ACL.asScala
-      if (!sensitivePath(path))
-        acls ++= ZooDefs.Ids.READ_ACL_UNSAFE.asScala
-      acls
-    } else ZooDefs.Ids.OPEN_ACL_UNSAFE.asScala
-  }
 }
