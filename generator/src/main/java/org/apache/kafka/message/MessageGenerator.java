@@ -22,11 +22,14 @@ import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jdk8.Jdk8Module;
+
 import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.Namespace;
 
 import java.io.BufferedWriter;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -52,6 +55,10 @@ public final class MessageGenerator {
     static final String API_MESSAGE_TYPE_JAVA = "ApiMessageType.java";
 
     static final String API_SCOPE_JAVA = "ApiScope.java";
+
+    static final String COORDINATOR_RECORD_TYPE_JAVA = "CoordinatorRecordType.java";
+
+    static final String COORDINATOR_RECORD_JSON_CONVERTERS_JAVA = "CoordinatorRecordJsonConverters.java";
 
     static final String METADATA_RECORD_TYPE_JAVA = "MetadataRecordType.java";
 
@@ -163,7 +170,7 @@ public final class MessageGenerator {
     /**
      * The Jackson serializer we use for JSON objects.
      */
-    static final ObjectMapper JSON_SERDE;
+    public static final ObjectMapper JSON_SERDE;
 
     static {
         JSON_SERDE = new ObjectMapper();
@@ -172,6 +179,7 @@ public final class MessageGenerator {
         JSON_SERDE.configure(DeserializationFeature.FAIL_ON_TRAILING_TOKENS, true);
         JSON_SERDE.configure(JsonParser.Feature.ALLOW_COMMENTS, true);
         JSON_SERDE.setSerializationInclusion(JsonInclude.Include.NON_EMPTY);
+        JSON_SERDE.registerModule(new Jdk8Module());
     }
 
     private static List<TypeClassGenerator> createTypeClassGenerators(String packageName,
@@ -188,6 +196,12 @@ public final class MessageGenerator {
                     break;
                 case "MetadataJsonConvertersGenerator":
                     generators.add(new MetadataJsonConvertersGenerator(packageName));
+                    break;
+                case "CoordinatorRecordTypeGenerator":
+                    generators.add(new CoordinatorRecordTypeGenerator(packageName));
+                    break;
+                case "CoordinatorRecordJsonConvertersGenerator":
+                    generators.add(new CoordinatorRecordJsonConvertersGenerator(packageName));
                     break;
                 default:
                     throw new RuntimeException("Unknown type class generator type '" + type + "'");
@@ -238,7 +252,7 @@ public final class MessageGenerator {
                         String name = generator.outputName(spec) + JAVA_SUFFIX;
                         outputFileNames.add(name);
                         Path outputPath = Paths.get(outputDir, name);
-                        try (BufferedWriter writer = Files.newBufferedWriter(outputPath)) {
+                        try (BufferedWriter writer = Files.newBufferedWriter(outputPath, StandardCharsets.UTF_8)) {
                             generator.generateAndWrite(spec, writer);
                         }
                     }
@@ -252,7 +266,7 @@ public final class MessageGenerator {
         for (TypeClassGenerator typeClassGenerator : typeClassGenerators) {
             outputFileNames.add(typeClassGenerator.outputName());
             Path factoryOutputPath = Paths.get(outputDir, typeClassGenerator.outputName());
-            try (BufferedWriter writer = Files.newBufferedWriter(factoryOutputPath)) {
+            try (BufferedWriter writer = Files.newBufferedWriter(factoryOutputPath, StandardCharsets.UTF_8)) {
                 typeClassGenerator.generateAndWrite(writer);
             }
         }
@@ -270,7 +284,7 @@ public final class MessageGenerator {
         System.out.printf("MessageGenerator: processed %d Kafka message JSON files(s).%n", numProcessed);
     }
 
-    static String capitalizeFirst(String string) {
+    public static String capitalizeFirst(String string) {
         if (string.isEmpty()) {
             return string;
         }

@@ -16,13 +16,15 @@
  */
 package kafka.server
 
-import kafka.network
-import kafka.network.RequestChannel
-import org.apache.kafka.common.feature.{Features, SupportedVersionRange}
+import org.apache.kafka.common.feature.SupportedVersionRange
 import org.apache.kafka.common.message.ApiMessageType.ListenerType
 import org.apache.kafka.common.protocol.ApiKeys
 import org.apache.kafka.common.requests.ApiVersionsResponse
+import org.apache.kafka.network.metrics.RequestChannelMetrics
+import org.apache.kafka.server.{BrokerFeatures, ClientMetricsManager}
+import org.apache.kafka.server.common.FinalizedFeatures
 
+import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 
 trait ApiVersionManager {
@@ -30,22 +32,14 @@ trait ApiVersionManager {
   def listenerType: ListenerType
   def enabledApis: collection.Set[ApiKeys]
 
-  /**
-   * @see [[DefaultApiVersionManager.apiVersionResponse]]
-   * @see [[kafka.server.KafkaApis.handleApiVersionsRequest]]
-   */
-  def apiVersionResponse(throttleTimeMs: Int): ApiVersionsResponse
-
-  /**
-   * @see [[SimpleApiVersionManager.apiVersionResponse]]
-   * @see [[kafka.server.ControllerApis.handleApiVersionsRequest]]
-   */
-  def apiVersionResponse(throttleTimeMs: Int, finalizedFeatures: Map[String, java.lang.Short], finalizedFeaturesEpoch: Long): ApiVersionsResponse
+  def apiVersionResponse(throttleTimeMs: Int, alterFeatureLevel0: Boolean): ApiVersionsResponse
 
   def isApiEnabled(apiKey: ApiKeys, apiVersion: Short): Boolean = {
     apiKey != null && apiKey.inScope(listenerType) && apiKey.isVersionEnabled(apiVersion, enableUnstableLastVersion)
   }
-  def newRequestMetrics: RequestChannel.Metrics = new network.RequestChannel.Metrics(enabledApis)
+  def newRequestMetrics: RequestChannelMetrics = new RequestChannelMetrics(enabledApis.asJava)
+
+  def features: FinalizedFeatures
 }
 
 object ApiVersionManager {
@@ -54,7 +48,8 @@ object ApiVersionManager {
     config: KafkaConfig,
     forwardingManager: Option[ForwardingManager],
     supportedFeatures: BrokerFeatures,
-    metadataCache: MetadataCache
+    metadataCache: MetadataCache,
+    clientMetricsManager: Option[ClientMetricsManager]
   ): ApiVersionManager = {
     new DefaultApiVersionManager(
       listenerType,
@@ -62,7 +57,7 @@ object ApiVersionManager {
       supportedFeatures,
       metadataCache,
       config.unstableApiVersionsEnabled,
-      config.migrationEnabled
+      clientMetricsManager
     )
   }
 }
@@ -75,46 +70,49 @@ object ApiVersionManager {
  * @param enabledApis the enabled apis, which are computed by the listener type
  * @param brokerFeatures the broker features
  * @param enableUnstableLastVersion whether to enable unstable last version, see [[KafkaConfig.unstableApiVersionsEnabled]]
- * @param zkMigrationEnabled whether to enable zk migration, see [[KafkaConfig.migrationEnabled]]
+ * @param featuresProvider a provider to the finalized features supported
  */
 class SimpleApiVersionManager(
   val listenerType: ListenerType,
   val enabledApis: collection.Set[ApiKeys],
-  brokerFeatures: Features[SupportedVersionRange],
+  brokerFeatures: org.apache.kafka.common.feature.Features[SupportedVersionRange],
   val enableUnstableLastVersion: Boolean,
-  val zkMigrationEnabled: Boolean
+  val featuresProvider: () => FinalizedFeatures
 ) extends ApiVersionManager {
 
   def this(
     listenerType: ListenerType,
     enableUnstableLastVersion: Boolean,
-    zkMigrationEnabled: Boolean
+    featuresProvider: () => FinalizedFeatures
   ) = {
     this(
       listenerType,
       ApiKeys.apisForListener(listenerType).asScala,
-      BrokerFeatures.defaultSupportedFeatures(),
+      BrokerFeatures.defaultSupportedFeatures(enableUnstableLastVersion),
       enableUnstableLastVersion,
-      zkMigrationEnabled
+      featuresProvider
     )
   }
 
   private val apiVersions = ApiVersionsResponse.collectApis(enabledApis.asJava, enableUnstableLastVersion)
 
-  override def apiVersionResponse(requestThrottleMs: Int): ApiVersionsResponse = {
-    throw new UnsupportedOperationException("This method is not supported in SimpleApiVersionManager, use apiVersionResponse(throttleTimeMs, finalizedFeatures, epoch) instead")
+  override def apiVersionResponse(
+    throttleTimeMs: Int,
+    alterFeatureLevel0: Boolean
+  ): ApiVersionsResponse = {
+    val currentFeatures = features
+    new ApiVersionsResponse.Builder().
+      setThrottleTimeMs(throttleTimeMs).
+      setApiVersions(apiVersions).
+      setSupportedFeatures(brokerFeatures).
+      setFinalizedFeatures(currentFeatures.finalizedFeatures()).
+      setFinalizedFeaturesEpoch(currentFeatures.finalizedFeaturesEpoch()).
+      setZkMigrationEnabled(false).
+      setAlterFeatureLevel0(alterFeatureLevel0).
+      build()
   }
 
-  override def apiVersionResponse(throttleTimeMs: Int, finalizedFeatures: Map[String, java.lang.Short], finalizedFeaturesEpoch: Long): ApiVersionsResponse = {
-    ApiVersionsResponse.createApiVersionsResponse(
-      throttleTimeMs,
-      apiVersions,
-      brokerFeatures,
-      finalizedFeatures.asJava,
-      finalizedFeaturesEpoch,
-      zkMigrationEnabled
-    )
-  }
+  override def features: FinalizedFeatures = featuresProvider.apply()
 }
 
 /**
@@ -124,41 +122,54 @@ class SimpleApiVersionManager(
  *
  * @param listenerType the listener type
  * @param forwardingManager the forwarding manager,
- * @param features the broker features
+ * @param brokerFeatures the broker features
  * @param metadataCache the metadata cache, used to get the finalized features and the metadata version
  * @param enableUnstableLastVersion whether to enable unstable last version, see [[KafkaConfig.unstableApiVersionsEnabled]]
- * @param zkMigrationEnabled whether to enable zk migration, see [[KafkaConfig.migrationEnabled]]
+ * @param clientMetricsManager the client metrics manager, helps to determine whether client telemetry is enabled
  */
 class DefaultApiVersionManager(
   val listenerType: ListenerType,
   forwardingManager: Option[ForwardingManager],
-  features: BrokerFeatures,
+  brokerFeatures: BrokerFeatures,
   metadataCache: MetadataCache,
   val enableUnstableLastVersion: Boolean,
-  val zkMigrationEnabled: Boolean = false
+  val clientMetricsManager: Option[ClientMetricsManager] = None
 ) extends ApiVersionManager {
 
-  val enabledApis = ApiKeys.apisForListener(listenerType).asScala
+  val enabledApis: mutable.Set[ApiKeys] = ApiKeys.apisForListener(listenerType).asScala
 
-  override def apiVersionResponse(throttleTimeMs: Int): ApiVersionsResponse = {
-    val supportedFeatures = features.supportedFeatures
+  override def apiVersionResponse(
+    throttleTimeMs: Int,
+    alterFeatureLevel0: Boolean
+  ): ApiVersionsResponse = {
     val finalizedFeatures = metadataCache.features()
     val controllerApiVersions = forwardingManager.flatMap(_.controllerApiVersions)
-
-    ApiVersionsResponse.createApiVersionsResponse(
-      throttleTimeMs,
-      metadataCache.metadataVersion().highestSupportedRecordVersion,
-      supportedFeatures,
-      finalizedFeatures.features.map(kv => (kv._1, kv._2.asInstanceOf[java.lang.Short])).asJava,
-      finalizedFeatures.epoch,
-      controllerApiVersions.orNull,
-      listenerType,
-      enableUnstableLastVersion,
-      zkMigrationEnabled
-    )
+    val clientTelemetryEnabled = clientMetricsManager match {
+      case Some(manager) => manager.isTelemetryReceiverConfigured
+      case None => false
+    }
+    val apiVersions = if (controllerApiVersions.isDefined) {
+      ApiVersionsResponse.controllerApiVersions(
+        controllerApiVersions.get,
+        listenerType,
+        enableUnstableLastVersion,
+        clientTelemetryEnabled)
+    } else {
+      ApiVersionsResponse.brokerApiVersions(
+        listenerType,
+        enableUnstableLastVersion,
+        clientTelemetryEnabled)
+    }
+    new ApiVersionsResponse.Builder().
+      setThrottleTimeMs(throttleTimeMs).
+      setApiVersions(apiVersions).
+      setSupportedFeatures(brokerFeatures.supportedFeatures).
+      setFinalizedFeatures(finalizedFeatures.finalizedFeatures()).
+      setFinalizedFeaturesEpoch(finalizedFeatures.finalizedFeaturesEpoch()).
+      setZkMigrationEnabled(false).
+      setAlterFeatureLevel0(alterFeatureLevel0).
+      build()
   }
 
-  override def apiVersionResponse(throttleTimeMs: Int, finalizedFeatures: Map[String, java.lang.Short], finalizedFeatureEpoch: Long): ApiVersionsResponse = {
-    throw new UnsupportedOperationException("This method is not supported in DefaultApiVersionManager, use apiVersionResponse(throttleTimeMs) instead")
-  }
+  override def features: FinalizedFeatures = metadataCache.features()
 }

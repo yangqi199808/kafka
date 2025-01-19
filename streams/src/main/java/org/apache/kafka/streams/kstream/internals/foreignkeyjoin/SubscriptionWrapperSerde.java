@@ -16,18 +16,19 @@
  */
 package org.apache.kafka.streams.kstream.internals.foreignkeyjoin;
 
-import java.util.Map;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.streams.StreamsConfig;
+import org.apache.kafka.streams.internals.UpgradeFromValues;
 import org.apache.kafka.streams.kstream.internals.WrappingNullableDeserializer;
 import org.apache.kafka.streams.kstream.internals.WrappingNullableSerde;
 import org.apache.kafka.streams.kstream.internals.WrappingNullableSerializer;
 import org.apache.kafka.streams.processor.internals.SerdeGetter;
 
 import java.nio.ByteBuffer;
+import java.util.Map;
 import java.util.function.Supplier;
 
 public class SubscriptionWrapperSerde<K> extends WrappingNullableSerde<SubscriptionWrapper<K>, K, Void> {
@@ -74,26 +75,27 @@ public class SubscriptionWrapperSerde<K> extends WrappingNullableSerde<Subscript
                 return false;
             }
 
-            switch ((String) upgradeFrom) {
-                case StreamsConfig.UPGRADE_FROM_0100:
-                case StreamsConfig.UPGRADE_FROM_0101:
-                case StreamsConfig.UPGRADE_FROM_0102:
-                case StreamsConfig.UPGRADE_FROM_0110:
-                case StreamsConfig.UPGRADE_FROM_10:
-                case StreamsConfig.UPGRADE_FROM_11:
-                case StreamsConfig.UPGRADE_FROM_20:
-                case StreamsConfig.UPGRADE_FROM_21:
-                case StreamsConfig.UPGRADE_FROM_22:
-                case StreamsConfig.UPGRADE_FROM_23:
-                case StreamsConfig.UPGRADE_FROM_24:
-                case StreamsConfig.UPGRADE_FROM_25:
-                case StreamsConfig.UPGRADE_FROM_26:
-                case StreamsConfig.UPGRADE_FROM_27:
-                case StreamsConfig.UPGRADE_FROM_28:
-                case StreamsConfig.UPGRADE_FROM_30:
-                case StreamsConfig.UPGRADE_FROM_31:
-                case StreamsConfig.UPGRADE_FROM_32:
-                case StreamsConfig.UPGRADE_FROM_33:
+            switch (UpgradeFromValues.fromString((String) upgradeFrom)) {
+                case UPGRADE_FROM_0100:
+                case UPGRADE_FROM_0101:
+                case UPGRADE_FROM_0102:
+                case UPGRADE_FROM_0110:
+                case UPGRADE_FROM_10:
+                case UPGRADE_FROM_11:
+                case UPGRADE_FROM_20:
+                case UPGRADE_FROM_21:
+                case UPGRADE_FROM_22:
+                case UPGRADE_FROM_23:
+                case UPGRADE_FROM_24:
+                case UPGRADE_FROM_25:
+                case UPGRADE_FROM_26:
+                case UPGRADE_FROM_27:
+                case UPGRADE_FROM_28:
+                case UPGRADE_FROM_30:
+                case UPGRADE_FROM_31:
+                case UPGRADE_FROM_32:
+                case UPGRADE_FROM_33:
+                    // there is no need to add new versions here
                     return true;
                 default:
                     return false;
@@ -105,17 +107,17 @@ public class SubscriptionWrapperSerde<K> extends WrappingNullableSerde<Subscript
             //{1-bit-isHashNull}{7-bits-version}{1-byte-instruction}{Optional-16-byte-Hash}{PK-serialized}{4-bytes-primaryPartition}
 
             //7-bit (0x7F) maximum for data version.
-            if (Byte.compare((byte) 0x7F, data.getVersion()) < 0) {
+            if (Byte.compare((byte) 0x7F, data.version()) < 0) {
                 throw new UnsupportedVersionException("SubscriptionWrapper version is larger than maximum supported 0x7F");
             }
 
-            final int version = data.getVersion();
+            final int version = data.version();
             if (upgradeFromV0 || version == 0) {
                 return serializeV0(data);
             } else if (version == 1) {
                 return serializeV1(data);
             } else {
-                throw new UnsupportedVersionException("Unsupported SubscriptionWrapper version " + data.getVersion());
+                throw new UnsupportedVersionException("Unsupported SubscriptionWrapper version " + data.version());
             }
         }
 
@@ -126,7 +128,7 @@ public class SubscriptionWrapperSerde<K> extends WrappingNullableSerde<Subscript
 
             return  primaryKeySerializer.serialize(
                 primaryKeySerializationPseudoTopic,
-                data.getPrimaryKey()
+                data.primaryKey()
             );
         }
 
@@ -134,7 +136,7 @@ public class SubscriptionWrapperSerde<K> extends WrappingNullableSerde<Subscript
             final byte[] primaryKeySerializedData = serializePrimaryKey(data);
             final ByteBuffer buf;
             int dataLength = 2 + primaryKeySerializedData.length + extraLength;
-            if (data.getHash() != null) {
+            if (data.hash() != null) {
                 dataLength += 2 * Long.BYTES;
                 buf = ByteBuffer.allocate(dataLength);
                 buf.put(version);
@@ -143,9 +145,9 @@ public class SubscriptionWrapperSerde<K> extends WrappingNullableSerde<Subscript
                 buf = ByteBuffer.allocate(dataLength);
                 buf.put((byte) (version | (byte) 0x80));
             }
-            buf.put(data.getInstruction().getValue());
-            final long[] elem = data.getHash();
-            if (data.getHash() != null) {
+            buf.put(data.instruction().value());
+            final long[] elem = data.hash();
+            if (data.hash() != null) {
                 buf.putLong(elem[0]);
                 buf.putLong(elem[1]);
             }
@@ -158,8 +160,8 @@ public class SubscriptionWrapperSerde<K> extends WrappingNullableSerde<Subscript
         }
 
         private byte[] serializeV1(final SubscriptionWrapper<K> data) {
-            final ByteBuffer buf = serializeCommon(data, data.getVersion(), Integer.BYTES);
-            buf.putInt(data.getPrimaryPartition());
+            final ByteBuffer buf = serializeCommon(data, data.version(), Integer.BYTES);
+            buf.putInt(data.primaryPartition());
             return buf.array();
         }
     }

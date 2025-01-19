@@ -19,22 +19,23 @@ package kafka.server
 
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.Lock
-
+import com.typesafe.scalalogging.Logger
 import com.yammer.metrics.core.Meter
-import kafka.utils.Implicits._
-import kafka.utils.Pool
+import kafka.utils.{Logging, Pool}
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse
 import org.apache.kafka.server.metrics.KafkaMetricsGroup
+import org.apache.kafka.server.purgatory.DelayedOperation
 
 import scala.collection._
 import scala.jdk.CollectionConverters._
+import scala.jdk.OptionConverters.RichOption
 
 case class ProducePartitionStatus(requiredOffset: Long, responseStatus: PartitionResponse) {
   @volatile var acksPending = false
 
-  override def toString = s"[acksPending: $acksPending, error: ${responseStatus.error.code}, " +
+  override def toString: String = s"[acksPending: $acksPending, error: ${responseStatus.error.code}, " +
     s"startOffset: ${responseStatus.baseOffset}, requiredOffset: $requiredOffset]"
 }
 
@@ -47,6 +48,10 @@ case class ProduceMetadata(produceRequiredAcks: Short,
   override def toString = s"[requiredAcks: $produceRequiredAcks, partitionStatus: $produceStatus]"
 }
 
+object DelayedProduce {
+  private final val logger = Logger(classOf[DelayedProduce])
+}
+
 /**
  * A delayed produce operation that can be created by the replica manager and watched
  * in the produce operation purgatory
@@ -55,11 +60,13 @@ class DelayedProduce(delayMs: Long,
                      produceMetadata: ProduceMetadata,
                      replicaManager: ReplicaManager,
                      responseCallback: Map[TopicPartition, PartitionResponse] => Unit,
-                     lockOpt: Option[Lock] = None)
-  extends DelayedOperation(delayMs, lockOpt) {
+                     lockOpt: Option[Lock])
+  extends DelayedOperation(delayMs, lockOpt.toJava) with Logging {
+
+  override lazy val logger: Logger = DelayedProduce.logger
 
   // first update the acks pending variable according to the error code
-  produceMetadata.produceStatus.forKeyValue { (topicPartition, status) =>
+  produceMetadata.produceStatus.foreachEntry { (topicPartition, status) =>
     if (status.responseStatus.error == Errors.NONE) {
       // Timeout error state will be cleared when required acks are received
       status.acksPending = true
@@ -84,7 +91,7 @@ class DelayedProduce(delayMs: Long,
    */
   override def tryComplete(): Boolean = {
     // check for each partition if it still has pending acks
-    produceMetadata.produceStatus.forKeyValue { (topicPartition, status) =>
+    produceMetadata.produceStatus.foreachEntry { (topicPartition, status) =>
       trace(s"Checking produce satisfaction for $topicPartition, current status $status")
       // skip those partitions that have already been satisfied
       if (status.acksPending) {
@@ -113,7 +120,7 @@ class DelayedProduce(delayMs: Long,
   }
 
   override def onExpiration(): Unit = {
-    produceMetadata.produceStatus.forKeyValue { (topicPartition, status) =>
+    produceMetadata.produceStatus.foreachEntry { (topicPartition, status) =>
       if (status.acksPending) {
         debug(s"Expiring produce request for partition $topicPartition with status $status")
         DelayedProduceMetrics.recordExpiration(topicPartition)
@@ -147,4 +154,3 @@ object DelayedProduceMetrics {
     partitionExpirationMeters.getAndMaybePut(partition).mark()
   }
 }
-

@@ -284,14 +284,14 @@ public class FileRecords extends AbstractRecords implements Closeable {
             // are not enough available bytes in the response to read it fully. Note that this is
             // only possible prior to KIP-74, after which the broker was changed to always return at least
             // one full record batch, even if it requires exceeding the max fetch size requested by the client.
-            return new ConvertedRecords<>(this, RecordConversionStats.EMPTY);
+            return new ConvertedRecords<>(this, RecordValidationStats.EMPTY);
         } else {
             return convertedRecords;
         }
     }
 
     @Override
-    public long writeTo(TransferableChannel destChannel, long offset, int length) throws IOException {
+    public int writeTo(TransferableChannel destChannel, int offset, int length) throws IOException {
         long newSize = Math.min(channel.size(), end) - start;
         int oldSize = sizeInBytes();
         if (newSize < oldSize)
@@ -300,23 +300,24 @@ public class FileRecords extends AbstractRecords implements Closeable {
                     file.getAbsolutePath(), oldSize, newSize));
 
         long position = start + offset;
-        long count = Math.min(length, oldSize - offset);
-        return destChannel.transferFrom(channel, position, count);
+        int count = Math.min(length, oldSize - offset);
+        // safe to cast to int since `count` is an int
+        return (int) destChannel.transferFrom(channel, position, count);
     }
 
     /**
-     * Search forward for the file position of the last offset that is greater than or equal to the target offset
-     * and return its physical position and the size of the message (including log overhead) at the returned offset. If
-     * no such offsets are found, return null.
+     * Search forward for the file position of the message batch whose last offset that is greater
+     * than or equal to the target offset. If no such batch is found, return null.
      *
      * @param targetOffset The offset to search for.
      * @param startingPosition The starting position in the file to begin searching from.
+     * @return the batch's base offset, its physical position, and its size (including log overhead)
      */
     public LogOffsetPosition searchForOffsetWithSize(long targetOffset, int startingPosition) {
         for (FileChannelRecordBatch batch : batchesFrom(startingPosition)) {
             long offset = batch.lastOffset();
             if (offset >= targetOffset)
-                return new LogOffsetPosition(offset, batch.position(), batch.sizeInBytes());
+                return new LogOffsetPosition(batch.baseOffset(), batch.position(), batch.sizeInBytes());
         }
         return null;
     }
@@ -354,18 +355,18 @@ public class FileRecords extends AbstractRecords implements Closeable {
      */
     public TimestampAndOffset largestTimestampAfter(int startingPosition) {
         long maxTimestamp = RecordBatch.NO_TIMESTAMP;
-        long offsetOfMaxTimestamp = -1L;
+        long shallowOffsetOfMaxTimestamp = -1L;
         int leaderEpochOfMaxTimestamp = RecordBatch.NO_PARTITION_LEADER_EPOCH;
 
         for (RecordBatch batch : batchesFrom(startingPosition)) {
             long timestamp = batch.maxTimestamp();
             if (timestamp > maxTimestamp) {
                 maxTimestamp = timestamp;
-                offsetOfMaxTimestamp = batch.lastOffset();
+                shallowOffsetOfMaxTimestamp = batch.lastOffset();
                 leaderEpochOfMaxTimestamp = batch.partitionLeaderEpoch();
             }
         }
-        return new TimestampAndOffset(maxTimestamp, offsetOfMaxTimestamp,
+        return new TimestampAndOffset(maxTimestamp, shallowOffsetOfMaxTimestamp,
                 maybeLeaderEpoch(leaderEpochOfMaxTimestamp));
     }
 

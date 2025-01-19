@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.test;
 
+import org.apache.kafka.clients.MetadataSnapshot;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.Cluster;
@@ -29,13 +30,16 @@ import org.apache.kafka.common.message.ApiVersionsResponseData;
 import org.apache.kafka.common.network.NetworkReceive;
 import org.apache.kafka.common.network.Send;
 import org.apache.kafka.common.protocol.ApiKeys;
-import org.apache.kafka.common.record.RecordVersion;
+import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.UnalignedRecords;
 import org.apache.kafka.common.requests.ApiVersionsResponse;
 import org.apache.kafka.common.requests.ByteBufferChannel;
+import org.apache.kafka.common.requests.MetadataResponse.PartitionMetadata;
 import org.apache.kafka.common.requests.RequestHeader;
+import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.utils.Exit;
 import org.apache.kafka.common.utils.Utils;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -48,7 +52,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Base64;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -124,6 +127,42 @@ public class TestUtils {
     }
 
     /**
+     * Test utility function to get MetadataSnapshot with configured nodes and partitions.
+     * @param nodes number of nodes in the cluster
+     * @param topicPartitionCounts map of topic -> # of partitions
+     * @return a MetadataSnapshot with number of nodes, partitions as per the input.
+     */
+
+    public static MetadataSnapshot metadataSnapshotWith(final int nodes, final Map<String, Integer> topicPartitionCounts) {
+        final Node[] ns = new Node[nodes];
+        Map<Integer, Node> nodesById = new HashMap<>();
+        for (int i = 0; i < nodes; i++) {
+            ns[i] = new Node(i, "localhost", 1969);
+            nodesById.put(ns[i].id(), ns[i]);
+        }
+        final List<PartitionMetadata> partsMetadatas = new ArrayList<>();
+        for (final Map.Entry<String, Integer> topicPartition : topicPartitionCounts.entrySet()) {
+            final String topic = topicPartition.getKey();
+            final int partitions = topicPartition.getValue();
+            for (int i = 0; i < partitions; i++) {
+                TopicPartition tp = new TopicPartition(topic, partitions);
+                Node node = ns[i % ns.length];
+                partsMetadatas.add(new PartitionMetadata(Errors.NONE, tp, Optional.of(node.id()), Optional.empty(), null, null, null));
+            }
+        }
+        return new MetadataSnapshot("kafka-cluster", nodesById, partsMetadatas, Collections.emptySet(), Collections.emptySet(), Collections.emptySet(), null, Collections.emptyMap());
+    }
+
+    /**
+     * Test utility function to get MetadataSnapshot of cluster with configured, and 0 partitions.
+     * @param nodes number of nodes in the cluster.
+     * @return a MetadataSnapshot of cluster with number of nodes in the input.
+     */
+    public static MetadataSnapshot metadataSnapshotWith(int nodes) {
+        return metadataSnapshotWith(nodes, new HashMap<>());
+    }
+
+    /**
      * Generate an array of random bytes
      *
      * @param size The size of the array
@@ -196,6 +235,22 @@ public class TestUtils {
     }
 
     /**
+     * Create a temporary directory under the given root directory.
+     * The root directory is removed on JVM exit if it doesn't already exist
+     * when this function is invoked.
+     *
+     * @param root path to create temporary directory under
+     * @return the temporary directory created within {@code root}
+     */
+    public static File tempRelativeDir(String root) {
+        File rootFile = new File(root);
+        if (rootFile.mkdir()) {
+            rootFile.deleteOnExit();
+        }
+        return tempDirectory(rootFile.toPath(), null);
+    }
+
+    /**
      * Create a temporary relative directory in the specified parent directory with the given prefix.
      *
      * @param parent The parent folder path name, if null using the default temporary-file directory
@@ -210,7 +265,6 @@ public class TestUtils {
         } catch (final IOException ex) {
             throw new RuntimeException("Failed to create a temp dir", ex);
         }
-        file.deleteOnExit();
 
         Exit.addShutdownHook("delete-temp-file-shutdown-hook", () -> {
             try {
@@ -221,6 +275,23 @@ public class TestUtils {
         });
 
         return file;
+    }
+
+    /**
+     * Create a random log directory in the format <string>-<int> used for Kafka partition logs.
+     * It is the responsibility of the caller to set up a shutdown hook for deletion of the directory.
+     */
+    public static File randomPartitionLogDir(File parentDir) {
+        int attempts = 1000;
+        while (attempts > 0) {
+            File f = new File(parentDir, "kafka-" + RANDOM.nextInt(1000000));
+            if (f.mkdir()) {
+                f.deleteOnExit();
+                return f;
+            }
+            attempts--;
+        }
+        throw new RuntimeException("Failed to create directory after 1000 attempts");
     }
 
     public static Properties producerConfig(final String bootstrapServers,
@@ -238,6 +309,14 @@ public class TestUtils {
 
     public static Properties producerConfig(final String bootstrapServers, final Class<?> keySerializer, final Class<?> valueSerializer) {
         return producerConfig(bootstrapServers, keySerializer, valueSerializer, new Properties());
+    }
+
+    public static Properties requiredConsumerConfig() {
+        final Properties consumerConfig = new Properties();
+        consumerConfig.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9091");
+        consumerConfig.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        consumerConfig.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        return consumerConfig;
     }
 
     public static Properties consumerConfig(final String bootstrapServers,
@@ -451,10 +530,6 @@ public class TestUtils {
         return list;
     }
 
-    public static <T> Set<T> toSet(Collection<T> collection) {
-        return new HashSet<>(collection);
-    }
-
     public static ByteBuffer toBuffer(Send send) {
         ByteBufferChannel channel = new ByteBufferChannel(send.size());
         try {
@@ -492,8 +567,10 @@ public class TestUtils {
      */
     public static <T extends Throwable> T assertFutureThrows(Future<?> future, Class<T> exceptionCauseClass) {
         ExecutionException exception = assertThrows(ExecutionException.class, future::get);
-        assertTrue(exceptionCauseClass.isInstance(exception.getCause()),
-            "Unexpected exception cause " + exception.getCause());
+        Throwable cause = exception.getCause();
+        assertEquals(exceptionCauseClass, cause.getClass(),
+            "Expected a " + exceptionCauseClass.getSimpleName() + " exception, but got " +
+                        cause.getClass().getSimpleName());
         return exceptionCauseClass.cast(exception.getCause());
     }
 
@@ -504,19 +581,6 @@ public class TestUtils {
     ) {
         T receivedException = assertFutureThrows(future, expectedCauseClassApiException);
         assertEquals(expectedMessage, receivedException.getMessage());
-    }
-
-    public static void assertFutureError(Future<?> future, Class<? extends Throwable> exceptionClass)
-        throws InterruptedException {
-        try {
-            future.get();
-            fail("Expected a " + exceptionClass.getSimpleName() + " exception, but got success.");
-        } catch (ExecutionException ee) {
-            Throwable cause = ee.getCause();
-            assertEquals(exceptionClass, cause.getClass(),
-                "Expected a " + exceptionClass.getSimpleName() + " exception, but got " +
-                    cause.getClass().getSimpleName());
-        }
     }
 
     public static ApiKeys apiKeyFrom(NetworkReceive networkReceive) {
@@ -600,7 +664,7 @@ public class TestUtils {
     ) {
         return createApiVersionsResponse(
                 throttleTimeMs,
-                ApiVersionsResponse.filterApis(RecordVersion.current(), listenerType, true),
+                ApiVersionsResponse.filterApis(listenerType, true, true),
                 Features.emptySupportedFeatures(),
                 false
         );
@@ -613,7 +677,7 @@ public class TestUtils {
     ) {
         return createApiVersionsResponse(
                 throttleTimeMs,
-                ApiVersionsResponse.filterApis(RecordVersion.current(), listenerType, enableUnstableLastVersion),
+                ApiVersionsResponse.filterApis(listenerType, enableUnstableLastVersion, true),
                 Features.emptySupportedFeatures(),
                 false
         );
@@ -632,12 +696,13 @@ public class TestUtils {
             Features<SupportedVersionRange> latestSupportedFeatures,
             boolean zkMigrationEnabled
     ) {
-        return ApiVersionsResponse.createApiVersionsResponse(
-                throttleTimeMs,
-                apiVersions,
-                latestSupportedFeatures,
-                Collections.emptyMap(),
-                ApiVersionsResponse.UNKNOWN_FINALIZED_FEATURES_EPOCH,
-                zkMigrationEnabled);
+        return new ApiVersionsResponse.Builder().
+            setThrottleTimeMs(throttleTimeMs).
+            setApiVersions(apiVersions).
+            setSupportedFeatures(latestSupportedFeatures).
+            setFinalizedFeatures(Collections.emptyMap()).
+            setFinalizedFeaturesEpoch(ApiVersionsResponse.UNKNOWN_FINALIZED_FEATURES_EPOCH).
+            setZkMigrationEnabled(zkMigrationEnabled).
+            build();
     }
 }

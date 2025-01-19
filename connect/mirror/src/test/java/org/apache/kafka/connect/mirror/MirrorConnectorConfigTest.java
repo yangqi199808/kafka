@@ -19,17 +19,20 @@ package org.apache.kafka.connect.mirror;
 import org.apache.kafka.clients.CommonClientConfigs;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.metrics.JmxReporter;
+import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.test.MockMetricsReporter;
+
 import org.junit.jupiter.api.Test;
 
-import java.util.Map;
 import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
 
 import static org.apache.kafka.connect.mirror.TestUtils.makeProps;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class MirrorConnectorConfigTest {
 
@@ -176,15 +179,22 @@ public class MirrorConnectorConfigTest {
     }
 
     @Test
-    @SuppressWarnings("deprecation")
-    public void testMetricsReporters() {
-        Map<String, String> connectorProps = makeProps("metric.reporters", MockMetricsReporter.class.getName());
-        MirrorConnectorConfig config = new TestMirrorConnectorConfig(connectorProps);
-        assertEquals(2, config.metricsReporters().size());
+    public void testCaseInsensitiveSecurityProtocol() {
+        final String saslSslLowerCase = SecurityProtocol.SASL_SSL.name.toLowerCase(Locale.ROOT);
+        final TestMirrorConnectorConfig config = new TestMirrorConnectorConfig(makeProps(
+                CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, saslSslLowerCase));
+        assertEquals(saslSslLowerCase, config.originalsStrings().get(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG));
+    }
 
-        connectorProps.put(CommonClientConfigs.AUTO_INCLUDE_JMX_REPORTER_CONFIG, "false");
-        config = new TestMirrorConnectorConfig(connectorProps);
+    @Test
+    public void testMetricsReporters() {
+        Map<String, String> connectorProps = makeProps();
+        MirrorConnectorConfig config = new TestMirrorConnectorConfig(connectorProps);
         assertEquals(1, config.metricsReporters().size());
+
+        connectorProps.put("metric.reporters", JmxReporter.class.getName() + "," + MockMetricsReporter.class.getName());
+        config = new TestMirrorConnectorConfig(connectorProps);
+        assertEquals(2, config.metricsReporters().size());
     }
 
     @Test

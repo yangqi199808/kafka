@@ -22,7 +22,6 @@ import org.rocksdb.AbstractComparator;
 import org.rocksdb.AbstractEventListener;
 import org.rocksdb.AbstractSlice;
 import org.rocksdb.AbstractWalFilter;
-import org.rocksdb.AccessHint;
 import org.rocksdb.BuiltinComparator;
 import org.rocksdb.Cache;
 import org.rocksdb.ColumnFamilyOptions;
@@ -37,9 +36,11 @@ import org.rocksdb.DBOptions;
 import org.rocksdb.DbPath;
 import org.rocksdb.Env;
 import org.rocksdb.InfoLogLevel;
+import org.rocksdb.LoggerInterface;
 import org.rocksdb.MemTableConfig;
 import org.rocksdb.MergeOperator;
 import org.rocksdb.Options;
+import org.rocksdb.PrepopulateBlobCache;
 import org.rocksdb.RateLimiter;
 import org.rocksdb.SstFileManager;
 import org.rocksdb.SstPartitionerFactory;
@@ -320,12 +321,6 @@ public class RocksDBGenericOptionsToDbOptionsColumnFamilyOptionsAdapter extends 
         return this;
     }
 
-    @Deprecated
-    @Override
-    public int maxBackgroundCompactions() {
-        return dbOptions.maxBackgroundCompactions();
-    }
-
     @Override
     public Options setStatistics(final Statistics statistics) {
         dbOptions.setStatistics(statistics);
@@ -337,31 +332,6 @@ public class RocksDBGenericOptionsToDbOptionsColumnFamilyOptionsAdapter extends 
         return dbOptions.statistics();
     }
 
-    @Deprecated
-    public void setBaseBackgroundCompactions(final int baseBackgroundCompactions) {
-        final String message = "This method has been removed from the underlying RocksDB. " +
-                "It was not affecting compaction even in earlier versions. " +
-                "It is currently a no-op method. " +
-                "RocksDB decides the number of background compactions based on the maxBackgroundJobs(...) method";
-        log.warn(message);
-        // no-op
-    }
-
-    @Deprecated
-    public int baseBackgroundCompactions() {
-        final String message = "This method has been removed from the underlying RocksDB. " +
-                "It is currently a no-op method which returns a default value of -1.";
-        log.warn(message);
-        return -1;
-    }
-
-    @Deprecated
-    @Override
-    public Options setMaxBackgroundCompactions(final int maxBackgroundCompactions) {
-        dbOptions.setMaxBackgroundCompactions(maxBackgroundCompactions);
-        return this;
-    }
-
     @Override
     public Options setMaxSubcompactions(final int maxSubcompactions) {
         dbOptions.setMaxSubcompactions(maxSubcompactions);
@@ -371,19 +341,6 @@ public class RocksDBGenericOptionsToDbOptionsColumnFamilyOptionsAdapter extends 
     @Override
     public int maxSubcompactions() {
         return dbOptions.maxSubcompactions();
-    }
-
-    @Deprecated
-    @Override
-    public int maxBackgroundFlushes() {
-        return dbOptions.maxBackgroundFlushes();
-    }
-
-    @Deprecated
-    @Override
-    public Options setMaxBackgroundFlushes(final int maxBackgroundFlushes) {
-        dbOptions.setMaxBackgroundFlushes(maxBackgroundFlushes);
-        return this;
     }
 
     @Override
@@ -604,34 +561,6 @@ public class RocksDBGenericOptionsToDbOptionsColumnFamilyOptionsAdapter extends 
     @Override
     public long dbWriteBufferSize() {
         return dbOptions.dbWriteBufferSize();
-    }
-
-    @Override
-    public Options setAccessHintOnCompactionStart(final AccessHint accessHint) {
-        dbOptions.setAccessHintOnCompactionStart(accessHint);
-        return this;
-    }
-
-    @Override
-    public AccessHint accessHintOnCompactionStart() {
-        return dbOptions.accessHintOnCompactionStart();
-    }
-
-    @Deprecated
-    public Options setNewTableReaderForCompactionInputs(final boolean newTableReaderForCompactionInputs) {
-        final String message = "This method has been removed from the underlying RocksDB. " +
-                "It was not affecting compaction even in earlier versions. " +
-                "It is currently a no-op method.";
-        log.warn(message);
-        return this;
-    }
-
-    @Deprecated
-    public boolean newTableReaderForCompactionInputs() {
-        final String message = "This method has been removed from the underlying RocksDB. " +
-                "It is now a method which always returns false.";
-        log.warn(message);
-        return false;
     }
 
     @Override
@@ -878,7 +807,7 @@ public class RocksDBGenericOptionsToDbOptionsColumnFamilyOptionsAdapter extends 
     }
 
     @Override
-    public Options setLogger(final org.rocksdb.Logger logger) {
+    public Options setLogger(final LoggerInterface logger) {
         dbOptions.setLogger(logger);
         return this;
     }
@@ -949,6 +878,16 @@ public class RocksDBGenericOptionsToDbOptionsColumnFamilyOptionsAdapter extends 
         return this;
     }
 
+    @Override
+    public Options setMemtableMaxRangeDeletions(final int n) {
+        columnFamilyOptions.setMemtableMaxRangeDeletions(n);
+        return this;
+    }
+
+    @Override
+    public int memtableMaxRangeDeletions() {
+        return columnFamilyOptions.memtableMaxRangeDeletions();
+    }
 
     @Override
     public Options setBottommostCompressionType(final CompressionType bottommostCompressionType) {
@@ -1499,26 +1438,6 @@ public class RocksDBGenericOptionsToDbOptionsColumnFamilyOptionsAdapter extends 
         return dbOptions.allowIngestBehind();
     }
 
-    @Deprecated
-    public Options setPreserveDeletes(final boolean preserveDeletes) {
-        final String message = "This method has been removed from the underlying RocksDB. " +
-                "It was marked for deprecation in earlier versions. " +
-                "The behaviour can be replicated by using user-defined timestamps. " +
-                "It is currently a no-op method.";
-        log.warn(message);
-        // no-op
-        return this;
-    }
-
-    @Deprecated
-    public boolean preserveDeletes() {
-        final String message = "This method has been removed from the underlying RocksDB. " +
-                "It was marked for deprecation in earlier versions. " +
-                "It is currently a no-op method with a default value of false.";
-        log.warn(message);
-        return false;
-    }
-
     @Override
     public Options setTwoWriteQueues(final boolean twoWriteQueues) {
         dbOptions.setTwoWriteQueues(twoWriteQueues);
@@ -1728,6 +1647,17 @@ public class RocksDBGenericOptionsToDbOptionsColumnFamilyOptionsAdapter extends 
     public boolean memtableWholeKeyFiltering() {
         return columnFamilyOptions.memtableWholeKeyFiltering();
     }
+    
+    @Override
+    public Options setExperimentalMempurgeThreshold(final double experimentalMempurgeThreshold) {
+        columnFamilyOptions.setExperimentalMempurgeThreshold(experimentalMempurgeThreshold);
+        return this;
+    }
+
+    @Override
+    public double experimentalMempurgeThreshold() {
+        return columnFamilyOptions.experimentalMempurgeThreshold();
+    }
 
     //
     // BEGIN options for blobs (integrated BlobDB)
@@ -1808,6 +1738,29 @@ public class RocksDBGenericOptionsToDbOptionsColumnFamilyOptionsAdapter extends 
     @Override
     public double blobGarbageCollectionForceThreshold() {
         return columnFamilyOptions.blobGarbageCollectionForceThreshold();
+    }
+
+
+    @Override
+    public Options setPrepopulateBlobCache(final PrepopulateBlobCache prepopulateBlobCache) {
+        columnFamilyOptions.setPrepopulateBlobCache(prepopulateBlobCache);
+        return this;
+    }
+
+    @Override
+    public PrepopulateBlobCache prepopulateBlobCache() {
+        return columnFamilyOptions.prepopulateBlobCache();
+    }
+
+    @Override
+    public Options setBlobFileStartingLevel(final int blobFileStartingLevel) {
+        columnFamilyOptions.setBlobFileStartingLevel(blobFileStartingLevel);
+        return this;
+    }
+
+    @Override
+    public int blobFileStartingLevel() {
+        return columnFamilyOptions.blobFileStartingLevel();
     }
 
     //

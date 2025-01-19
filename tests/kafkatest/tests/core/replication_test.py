@@ -69,12 +69,12 @@ def hard_bounce(test, broker_type):
 
         gracePeriodSecs = 5
         if test.zk:
-            wait_until(lambda: len(test.kafka.pids(prev_broker_node)) == 0 and not test.kafka.is_registered(prev_broker_node),
+            wait_until(lambda: not test.kafka.pids(prev_broker_node) and not test.kafka.is_registered(prev_broker_node),
                        timeout_sec=test.kafka.zk_session_timeout + gracePeriodSecs,
                        err_msg="Failed to see timely deregistration of hard-killed broker %s" % str(prev_broker_node.account))
         else:
             brokerSessionTimeoutSecs = 18
-            wait_until(lambda: len(test.kafka.pids(prev_broker_node)) == 0,
+            wait_until(lambda: not test.kafka.pids(prev_broker_node),
                        timeout_sec=brokerSessionTimeoutSecs + gracePeriodSecs,
                        err_msg="Failed to see timely disappearance of process for hard-killed broker %s" % str(prev_broker_node.account))
             time.sleep(brokerSessionTimeoutSecs + gracePeriodSecs)
@@ -122,21 +122,16 @@ class ReplicationTest(EndToEndTest):
     @matrix(failure_mode=["clean_shutdown", "hard_shutdown", "clean_bounce", "hard_bounce"],
             broker_type=["leader"],
             security_protocol=["PLAINTEXT"],
-            enable_idempotence=[True])
+            enable_idempotence=[True],
+            metadata_quorum=quorum.all_non_upgrade)
     @matrix(failure_mode=["clean_shutdown", "hard_shutdown", "clean_bounce", "hard_bounce"],
             broker_type=["leader"],
             security_protocol=["PLAINTEXT", "SASL_SSL"],
             metadata_quorum=quorum.all_non_upgrade)
-    @matrix(failure_mode=["clean_shutdown", "hard_shutdown", "clean_bounce", "hard_bounce"],
-            broker_type=["controller"],
-            security_protocol=["PLAINTEXT", "SASL_SSL"])
     @matrix(failure_mode=["hard_bounce"],
             broker_type=["leader"],
             security_protocol=["SASL_SSL"], client_sasl_mechanism=["PLAIN"], interbroker_sasl_mechanism=["PLAIN", "GSSAPI"],
             metadata_quorum=quorum.all_non_upgrade)
-    @parametrize(failure_mode="hard_bounce",
-            broker_type="leader",
-            security_protocol="SASL_SSL", client_sasl_mechanism="SCRAM-SHA-256", interbroker_sasl_mechanism="SCRAM-SHA-512")
     @matrix(failure_mode=["clean_shutdown", "hard_shutdown", "clean_bounce", "hard_bounce"],
             security_protocol=["PLAINTEXT"], broker_type=["leader"], compression_type=["gzip"], tls_version=["TLSv1.2", "TLSv1.3"],
             metadata_quorum=quorum.all_non_upgrade)
@@ -148,7 +143,7 @@ class ReplicationTest(EndToEndTest):
         These tests verify that replication provides simple durability guarantees by checking that data acked by
         brokers is still available for consumption in the face of various failure scenarios.
 
-        Setup: 1 zk/KRaft controller, 3 kafka nodes, 1 topic with partitions=3, replication-factor=3, and min.insync.replicas=2
+        Setup: 1 KRaft controller, 3 kafka nodes, 1 topic with partitions=3, replication-factor=3, and min.insync.replicas=2
 
             - Produce messages in the background
             - Consume messages in the background
@@ -159,9 +154,6 @@ class ReplicationTest(EndToEndTest):
 
         if failure_mode == "controller" and metadata_quorum != quorum.zk:
             raise Exception("There is no controller broker when using KRaft metadata quorum")
-        self.create_zookeeper_if_necessary()
-        if self.zk:
-            self.zk.start()
 
         self.create_kafka(num_nodes=3,
                           security_protocol=security_protocol,

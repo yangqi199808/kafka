@@ -22,6 +22,7 @@ import org.apache.kafka.image.MetadataImage;
 import org.apache.kafka.image.loader.LoaderManifest;
 import org.apache.kafka.image.publisher.MetadataPublisher;
 import org.apache.kafka.shell.node.RootShellNode;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,5 +51,9 @@ public class MetadataShellPublisher implements MetadataPublisher {
     ) {
         log.trace("onMetadataUpdate newImage={}", newImage);
         state.setRoot(new RootShellNode(newImage));
+    }
+
+    public MetadataShellState state() {
+        return state;
     }
 }
